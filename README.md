@@ -185,20 +185,12 @@ Athena partition projection → avoid full-table scans.
 
 Redshift Serverless → auto-pause when idle.
 
-9) Screenshots
-docs/images/ec2-launch.png → (EC2 bootstrap, optional dev env)
 
-docs/images/s3-structure.png → S3 bucket layout
-
-docs/images/airflow-dag.png → DAG in MWAA
-
-docs/images/athena-query.png → Sample query result
-
-docs/images/quicksight-dashboard.png → Dashboard
-
-10) Next Steps
+9) Next Steps
 Add Great Expectations for data quality checks.
 
 Explore SageMaker for anomaly detection on GitHub activity.
 
 Add CI/CD with CodePipeline → deploy DAGs automatically.
+
+# Just to present Try out your options 
