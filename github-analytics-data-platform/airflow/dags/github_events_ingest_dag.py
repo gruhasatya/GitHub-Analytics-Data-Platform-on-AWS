@@ -1,53 +1,27 @@
-import os
-from datetime import datetime, timedelta, date
-
+from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+import requests, gzip, io, boto3
 
-import boto3
-import requests
-
-BUCKET_NAME = os.getenv("BUCKET_NAME", "github-analytics-data")
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
-
-def _date_to_hours(target_date: date):
-    for h in range(24):
-        yield target_date.strftime("%Y-%m-%d"), h
-
-def download_and_upload(**context):
-    session = boto3.session.Session(region_name=AWS_REGION)
-    s3 = session.client("s3")
-
-    # Determine which date to ingest: BACKFILL_DATE env or yesterday (UTC)
-    backfill = os.getenv("BACKFILL_DATE")
-    if backfill:
-        tgt = datetime.strptime(backfill, "%Y-%m-%d").date()
-    else:
-        tgt = (datetime.utcnow() - timedelta(days=1)).date()
-
-    for dstr, hour in _date_to_hours(tgt):
-        url = f"https://data.gharchive.org/{dstr}-{hour}.json.gz"
-        key = f"raw/date={dstr}/hour={hour:02d}/{dstr}-{hour}.json.gz"
-
-        # Stream download
-        resp = requests.get(url, stream=True, timeout=60)
-        if resp.status_code != 200:
-            print(f"Skipping missing hour {dstr} {hour:02d}: HTTP {resp.status_code}")
-            continue
-
-        tmp_path = f"/tmp/{dstr}-{hour}.json.gz"
-        with open(tmp_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    f.write(chunk)
-
-        # Upload to S3
-        s3.upload_file(tmp_path, BUCKET_NAME, key)
-        print(f"Uploaded s3://{BUCKET_NAME}/{key}")
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+BUCKET = "github-analytics-data"
+RAW_PREFIX = "raw"
+AWS_REGION = "us-east-2" 
+def fetch_github_events(exec_date_str: str, **context):
+    year, month, day = exec_date_str.split("-")
+    s3 = boto3.client("s3", region_name=AWS_REGION)
+    out_file = f"/tmp/github_events_{exec_date_str}.ndjson"
+    with open(out_file, "wb") as f_out:
+        for hour in range(24):
+            url = f"https://data.gharchive.org/{exec_date_str}-{hour}.json.gz"
+            print(f"Downloading {url} ...")
+            response = requests.get(url, stream=True)
+            response.raise_for_status()
+            with gzip.GzipFile(fileobj=response.raw) as gz:
+                for line in gz:
+                    f_out.write(line)
+    s3_key = f"{RAW_PREFIX}/{exec_date_str}/events.ndjson"
+    s3.upload_file(out_file, BUCKET, s3_key)
+    print(f"Uploaded {s3_key} to s3://{BUCKET}/")
 
 default_args = {
     "owner": "airflow",
@@ -55,19 +29,17 @@ default_args = {
     "retries": 1,
     "retry_delay": timedelta(minutes=5),
 }
-
 with DAG(
-    dag_id="github_events_ingest",
+    "github_events_to_s3",
     default_args=default_args,
-    start_date=datetime(2024, 1, 1),
-    schedule_interval="@daily",
+    description="Fetch GitHub Archive events and load to S3",
+    schedule_interval="0 1 * * *",  # run daily at 01:00
+    start_date=datetime(2025, 8, 1),
     catchup=False,
-    tags=["github", "ingestion", "s3"],
-    description="Downloads GitHub Archive hourly JSON.gz files into S3 raw/ partitioned by date/hour.",
+    tags=["github", "ingest"],
 ) as dag:
-
-    ingest = PythonOperator(
-        task_id="download_and_upload",
-        python_callable=download_and_upload,
-        provide_context=True,
+    ingest_task = PythonOperator(
+        task_id="download_and_upload_events",
+        python_callable=fetch_github_events,
+        op_kwargs={"exec_date_str": "{{ ds }}"}
     )
